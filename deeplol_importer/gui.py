@@ -9,6 +9,7 @@ from deeplol_importer.deeplol_client import (
     map_lcu_position_to_deeplol_lane,
     parse_deeplol_url,
 )
+from deeplol_importer.i18n import CODE_TO_DISPLAY, DISPLAY_TO_CODE, LANGUAGES, t
 from deeplol_importer.lcu_client import LCUClient, resolve_summoner_spells
 from deeplol_importer.models import NormalizedBuild, OTPPlayerSummary
 
@@ -21,26 +22,29 @@ class DeepLoLImporterApp(ctk.CTk):
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
-        self.title("DeepLoL.gg -> LoL İstemcisi (LCU) Build & Rün Aktarıcı")
-        self.geometry("980x740")
-        self.minsize(880, 660)
-
-        self.deeplol = DeepLoLClient()
+        self.lang_code: str = "tr"
+        self.deeplol = DeepLoLClient(lang_code=self.lang_code)
         self.lcu = LCUClient()
+
+        self.title(t(self.lang_code, "window_title"))
+        self.geometry("1020x750")
+        self.minsize(900, 660)
 
         # State
         self._champions: list[tuple[int, str]] = []
         self._filtered_champions: list[tuple[int, str]] = []
-        self._selected_champion_id: int = 103  # Default: Ahri
+        self._selected_champion_id: int = 103
         self._meta_builds_by_lane: dict[str, list[NormalizedBuild]] = {}
         self._otp_players: list[OTPPlayerSummary] = []
         self._current_builds: list[NormalizedBuild] = []
         self._selected_build: NormalizedBuild | None = None
         self._last_auto_imported_key: tuple[int, str] | None = None
-        self._stop_Polling = False
+        self._current_mode_key: str = "meta"  # "meta" or "otp"
+        self._last_connected_summoner: str | None = None
+        self._stop_polling = False
 
         self._build_ui()
-        self._log("Uygulama başlatıldı. DeepLoL şampiyon verileri yükleniyor...")
+        self._log(t(self.lang_code, "log_started"))
 
         threading.Thread(target=self._initial_load_worker, daemon=True).start()
         self.after(2000, self._poll_lcu_loop)
@@ -56,7 +60,7 @@ class DeepLoLImporterApp(ctk.CTk):
 
         self.lcu_status_label = ctk.CTkLabel(
             top_frame,
-            text="🔴 LCU: LoL İstemcisi Bekleniyor...",
+            text=t(self.lang_code, "lcu_waiting"),
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color="#f87171",
         )
@@ -64,7 +68,7 @@ class DeepLoLImporterApp(ctk.CTk):
 
         self.champ_select_label = ctk.CTkLabel(
             top_frame,
-            text="Şampiyon Seçimi: Aktif Değil",
+            text=t(self.lang_code, "cs_inactive"),
             font=ctk.CTkFont(size=12),
             text_color="#9ca3af",
         )
@@ -73,38 +77,53 @@ class DeepLoLImporterApp(ctk.CTk):
         self.auto_import_var = ctk.BooleanVar(value=True)
         self.auto_import_switch = ctk.CTkSwitch(
             top_frame,
-            text="Şampiyon Seçiminde Otomatik Aktar",
+            text=t(self.lang_code, "auto_import"),
             variable=self.auto_import_var,
             font=ctk.CTkFont(size=12, weight="bold"),
         )
-        self.auto_import_switch.grid(row=0, column=2, padx=12, pady=10, sticky="e")
+        self.auto_import_switch.grid(row=0, column=2, padx=10, pady=10, sticky="e")
+
+        lang_names = [name for name, _ in LANGUAGES.values()]
+        self.lang_var = ctk.StringVar(value=CODE_TO_DISPLAY[self.lang_code])
+        self.lang_menu = ctk.CTkOptionMenu(
+            top_frame,
+            values=lang_names,
+            variable=self.lang_var,
+            width=145,
+            command=self._on_language_changed,
+        )
+        self.lang_menu.grid(row=0, column=3, padx=(4, 12), pady=10, sticky="e")
 
         # Options Row inside top_frame
         opts_frame = ctk.CTkFrame(top_frame, fg_color="transparent")
-        opts_frame.grid(row=1, column=0, columnspan=3, padx=12, pady=(0, 10), sticky="ew")
+        opts_frame.grid(row=1, column=0, columnspan=4, padx=12, pady=(0, 10), sticky="ew")
 
         self.import_runes_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(
+        self.chk_runes = ctk.CTkCheckBox(
             opts_frame,
-            text="Rün Sayfası Aktar",
+            text=t(self.lang_code, "chk_runes"),
             variable=self.import_runes_var,
-        ).pack(side="left", padx=(0, 16))
+        )
+        self.chk_runes.pack(side="left", padx=(0, 16))
 
         self.import_items_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(
+        self.chk_items = ctk.CTkCheckBox(
             opts_frame,
-            text="Eşya Seti (Item Set) Aktar",
+            text=t(self.lang_code, "chk_items"),
             variable=self.import_items_var,
-        ).pack(side="left", padx=(0, 16))
+        )
+        self.chk_items.pack(side="left", padx=(0, 16))
 
         self.import_spells_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(
+        self.chk_spells = ctk.CTkCheckBox(
             opts_frame,
-            text="Sihirdar Büyülerini (D/F) Aktar",
+            text=t(self.lang_code, "chk_spells"),
             variable=self.import_spells_var,
-        ).pack(side="left", padx=(0, 16))
+        )
+        self.chk_spells.pack(side="left", padx=(0, 16))
 
-        ctk.CTkLabel(opts_frame, text="Sıçra (Flash) Tuşu:").pack(side="left", padx=(8, 6))
+        self.lbl_flash_key = ctk.CTkLabel(opts_frame, text=t(self.lang_code, "flash_key"))
+        self.lbl_flash_key.pack(side="left", padx=(8, 6))
         self.flash_key_var = ctk.StringVar(value="F")
         self.flash_key_menu = ctk.CTkOptionMenu(
             opts_frame,
@@ -120,34 +139,34 @@ class DeepLoLImporterApp(ctk.CTk):
         ctrl_frame.grid(row=1, column=0, padx=14, pady=6, sticky="ew")
         ctrl_frame.grid_columnconfigure(1, weight=1)
 
-        # Row 0: URL Input
-        ctk.CTkLabel(
+        self.lbl_url = ctk.CTkLabel(
             ctrl_frame,
-            text="DeepLoL URL:",
+            text=t(self.lang_code, "lbl_url"),
             font=ctk.CTkFont(size=12, weight="bold"),
-        ).grid(row=0, column=0, padx=12, pady=(10, 6), sticky="w")
+        )
+        self.lbl_url.grid(row=0, column=0, padx=12, pady=(10, 6), sticky="w")
 
         self.url_entry = ctk.CTkEntry(
             ctrl_frame,
-            placeholder_text="Örn: https://www.deeplol.gg/champions/ahri/build/mid veya /champions/ahri/mastery/all",
+            placeholder_text=t(self.lang_code, "ph_url"),
         )
         self.url_entry.grid(row=0, column=1, columnspan=3, padx=6, pady=(10, 6), sticky="ew")
         self.url_entry.bind("<Return>", lambda _: self._on_load_url_clicked())
 
         self.load_url_btn = ctk.CTkButton(
             ctrl_frame,
-            text="URL'den Çek",
-            width=120,
+            text=t(self.lang_code, "btn_load_url"),
+            width=125,
             command=self._on_load_url_clicked,
         )
         self.load_url_btn.grid(row=0, column=4, padx=12, pady=(10, 6))
 
-        # Row 1: Manual Champion Filter + Dropdown + Mode + Lane/Region
-        ctk.CTkLabel(
+        self.lbl_search_champ = ctk.CTkLabel(
             ctrl_frame,
-            text="Şampiyon Ara:",
+            text=t(self.lang_code, "lbl_search_champ"),
             font=ctk.CTkFont(size=12, weight="bold"),
-        ).grid(row=1, column=0, padx=12, pady=(4, 10), sticky="w")
+        )
+        self.lbl_search_champ.grid(row=1, column=0, padx=12, pady=(4, 10), sticky="w")
 
         champ_subframe = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         champ_subframe.grid(row=1, column=1, padx=6, pady=(4, 10), sticky="ew")
@@ -156,11 +175,11 @@ class DeepLoLImporterApp(ctk.CTk):
         self.champ_search_entry = ctk.CTkEntry(
             champ_subframe,
             textvariable=self.champ_search_var,
-            placeholder_text="Filtrele (örn. Ahri)...",
+            placeholder_text=t(self.lang_code, "ph_search_champ"),
             width=140,
         )
         self.champ_search_entry.pack(side="left", padx=(0, 6))
-        self.champ_search_entry.bind("<KeyRelease>", self._on_champion_Filter_changed)
+        self.champ_search_entry.bind("<KeyRelease>", self._on_champion_filter_changed)
 
         self.champ_menu_var = ctk.StringVar(value="Ahri")
         self.champ_menu = ctk.CTkOptionMenu(
@@ -172,10 +191,12 @@ class DeepLoLImporterApp(ctk.CTk):
         )
         self.champ_menu.pack(side="left")
 
-        self.mode_var = ctk.StringVar(value="Meta & ARAM")
+        meta_label = t(self.lang_code, "mode_meta")
+        otp_label = t(self.lang_code, "mode_otp")
+        self.mode_var = ctk.StringVar(value=meta_label)
         self.mode_segment = ctk.CTkSegmentedButton(
             ctrl_frame,
-            values=["Meta & ARAM", "OTP (One-Trick)"],
+            values=[meta_label, otp_label],
             variable=self.mode_var,
             command=self._on_mode_changed,
         )
@@ -193,8 +214,8 @@ class DeepLoLImporterApp(ctk.CTk):
 
         self.refresh_btn = ctk.CTkButton(
             ctrl_frame,
-            text="Verileri Yenile",
-            width=120,
+            text=t(self.lang_code, "btn_refresh"),
+            width=125,
             fg_color="#374151",
             hover_color="#4b5563",
             command=self._reload_current_champion_data,
@@ -208,35 +229,36 @@ class DeepLoLImporterApp(ctk.CTk):
 
         self.otp_player_label = ctk.CTkLabel(
             selector_frame,
-            text="OTP Oyuncu:",
+            text=t(self.lang_code, "lbl_otp_player"),
             font=ctk.CTkFont(size=12, weight="bold"),
         )
         self.otp_player_var = ctk.StringVar(value="")
         self.otp_player_menu = ctk.CTkOptionMenu(
             selector_frame,
             variable=self.otp_player_var,
-            values=["OTP Yükleniyor..."],
+            values=["..."],
             command=self._on_otp_player_selected,
         )
 
-        ctk.CTkLabel(
+        self.lbl_build_var = ctk.CTkLabel(
             selector_frame,
-            text="Build Varyasyonu:",
+            text=t(self.lang_code, "lbl_build_var"),
             font=ctk.CTkFont(size=12, weight="bold"),
-        ).grid(row=1, column=0, padx=12, pady=10, sticky="w")
+        )
+        self.lbl_build_var.grid(row=1, column=0, padx=12, pady=10, sticky="w")
 
-        self.build_var = ctk.StringVar(value="Yükleniyor...")
+        self.build_var = ctk.StringVar(value="...")
         self.build_menu = ctk.CTkOptionMenu(
             selector_frame,
             variable=self.build_var,
-            values=["Yükleniyor..."],
+            values=["..."],
             command=self._on_build_variation_selected,
         )
         self.build_menu.grid(row=1, column=1, padx=8, pady=10, sticky="ew")
 
         self.import_btn = ctk.CTkButton(
             selector_frame,
-            text="⚡ İstemciye Aktar (LCU Import)",
+            text=t(self.lang_code, "btn_import"),
             font=ctk.CTkFont(size=13, weight="bold"),
             height=36,
             fg_color="#10b981",
@@ -252,17 +274,19 @@ class DeepLoLImporterApp(ctk.CTk):
         content_frame.grid_columnconfigure(1, weight=2)
         content_frame.grid_rowconfigure(1, weight=1)
 
-        ctk.CTkLabel(
+        self.lbl_preview = ctk.CTkLabel(
             content_frame,
-            text="Seçili Build & Rün Önizlemesi",
+            text=t(self.lang_code, "lbl_preview"),
             font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=0, column=0, padx=12, pady=(10, 4), sticky="w")
+        )
+        self.lbl_preview.grid(row=0, column=0, padx=12, pady=(10, 4), sticky="w")
 
-        ctk.CTkLabel(
+        self.lbl_log = ctk.CTkLabel(
             content_frame,
-            text="İşlem Günlüğü (Log)",
+            text=t(self.lang_code, "lbl_log"),
             font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=0, column=1, padx=12, pady=(10, 4), sticky="w")
+        )
+        self.lbl_log.grid(row=0, column=1, padx=12, pady=(10, 4), sticky="w")
 
         self.preview_box = ctk.CTkTextbox(
             content_frame,
@@ -277,6 +301,53 @@ class DeepLoLImporterApp(ctk.CTk):
             wrap="word",
         )
         self.log_box.grid(row=1, column=1, padx=(6, 12), pady=(0, 12), sticky="nsew")
+
+    def _on_language_changed(self, display_name: str) -> None:
+        new_code = DISPLAY_TO_CODE.get(display_name, "en")
+        if new_code == self.lang_code:
+            return
+        self.lang_code = new_code
+
+        # Update static UI labels immediately
+        self.title(t(self.lang_code, "window_title"))
+        if self._last_connected_summoner:
+            self.lcu_status_label.configure(
+                text=t(self.lang_code, "lcu_connected", name=self._last_connected_summoner)
+            )
+        else:
+            self.lcu_status_label.configure(text=t(self.lang_code, "lcu_waiting"))
+
+        self.champ_select_label.configure(text=t(self.lang_code, "cs_inactive"))
+        self.auto_import_switch.configure(text=t(self.lang_code, "auto_import"))
+        self.chk_runes.configure(text=t(self.lang_code, "chk_runes"))
+        self.chk_items.configure(text=t(self.lang_code, "chk_items"))
+        self.chk_spells.configure(text=t(self.lang_code, "chk_spells"))
+        self.lbl_flash_key.configure(text=t(self.lang_code, "flash_key"))
+        self.lbl_url.configure(text=t(self.lang_code, "lbl_url"))
+        self.url_entry.configure(placeholder_text=t(self.lang_code, "ph_url"))
+        self.load_url_btn.configure(text=t(self.lang_code, "btn_load_url"))
+        self.lbl_search_champ.configure(text=t(self.lang_code, "lbl_search_champ"))
+        self.champ_search_entry.configure(placeholder_text=t(self.lang_code, "ph_search_champ"))
+
+        meta_label = t(self.lang_code, "mode_meta")
+        otp_label = t(self.lang_code, "mode_otp")
+        self.mode_segment.configure(values=[meta_label, otp_label])
+        self.mode_var.set(otp_label if self._current_mode_key == "otp" else meta_label)
+
+        self.refresh_btn.configure(text=t(self.lang_code, "btn_refresh"))
+        self.otp_player_label.configure(text=t(self.lang_code, "lbl_otp_player"))
+        self.lbl_build_var.configure(text=t(self.lang_code, "lbl_build_var"))
+        self.import_btn.configure(text=t(self.lang_code, "btn_import"))
+        self.lbl_preview.configure(text=t(self.lang_code, "lbl_preview"))
+        self.lbl_log.configure(text=t(self.lang_code, "lbl_log"))
+
+        self._log(t(self.lang_code, "log_lang_changed", lang=display_name))
+
+        def _switch_locale_worker() -> None:
+            self.deeplol.set_language(new_code)
+            self._reload_current_champion_data()
+
+        threading.Thread(target=_switch_locale_worker, daemon=True).start()
 
     def _log(self, message: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
@@ -305,12 +376,12 @@ class DeepLoLImporterApp(ctk.CTk):
                     self.champ_menu_var.set(ahri_name)
 
             self.after(0, _update_champ_menu)
-            self._log(f"DeepLoL güncel yama: {ver} ({len(champs)} şampiyon yüklendi).")
+            self._log(f"DeepLoL Patch: {ver} ({len(champs)} champions).")
             self._fetch_meta_builds_worker(self._selected_champion_id, preferred_lane="Middle")
         except Exception as exc:
-            self._log(f"Başlangıç yükleme hatası: {exc}")
+            self._log(f"Init error: {exc}")
 
-    def _on_champion_Filter_changed(self, _event=None) -> None:
+    def _on_champion_filter_changed(self, _event=None) -> None:
         query = self.champ_search_var.get().strip().lower()
         if not query:
             self._filtered_champions = list(self._champions)
@@ -318,7 +389,7 @@ class DeepLoLImporterApp(ctk.CTk):
             self._filtered_champions = [
                 (cid, name) for cid, name in self._champions if query in name.lower()
             ]
-        names = [name for _, name in self._filtered_champions] or ["Sonuç Yok"]
+        names = [name for _, name in self._filtered_champions] or ["-"]
         self.champ_menu.configure(values=names)
         if self._filtered_champions:
             first_cid, first_name = self._filtered_champions[0]
@@ -333,14 +404,17 @@ class DeepLoLImporterApp(ctk.CTk):
                 self._reload_current_champion_data()
                 break
 
-    def _on_mode_changed(self, mode: str) -> None:
-        if mode == "OTP (One-Trick)":
+    def _on_mode_changed(self, selected_mode_label: str) -> None:
+        otp_label = t(self.lang_code, "mode_otp")
+        if selected_mode_label == otp_label:
+            self._current_mode_key = "otp"
             self.lane_or_region_menu.configure(values=["KR", "EUW", "NA", "TR", "VN", "TW", "JP"])
             if self.lane_or_region_var.get() not in ("KR", "EUW", "NA", "TR", "VN", "TW", "JP"):
                 self.lane_or_region_var.set("KR")
             self.otp_player_label.grid(row=0, column=0, padx=12, pady=(10, 0), sticky="w")
             self.otp_player_menu.grid(row=0, column=1, columnspan=2, padx=8, pady=(10, 0), sticky="ew")
         else:
+            self._current_mode_key = "meta"
             self.otp_player_label.grid_forget()
             self.otp_player_menu.grid_forget()
             lanes = list(self._meta_builds_by_lane.keys()) or [
@@ -357,7 +431,7 @@ class DeepLoLImporterApp(ctk.CTk):
         self._reload_current_champion_data()
 
     def _on_lane_or_region_changed(self, value: str) -> None:
-        if self.mode_var.get() == "OTP (One-Trick)":
+        if self._current_mode_key == "otp":
             threading.Thread(
                 target=self._fetch_otp_list_worker,
                 args=(self._selected_champion_id, value),
@@ -368,7 +442,7 @@ class DeepLoLImporterApp(ctk.CTk):
             self._set_current_builds(lane_builds)
 
     def _reload_current_champion_data(self) -> None:
-        if self.mode_var.get() == "OTP (One-Trick)":
+        if self._current_mode_key == "otp":
             region = self.lane_or_region_var.get() or "KR"
             threading.Thread(
                 target=self._fetch_otp_list_worker,
@@ -386,7 +460,6 @@ class DeepLoLImporterApp(ctk.CTk):
     def _on_load_url_clicked(self) -> None:
         url = self.url_entry.get().strip()
         if not url:
-            self._log("Lütfen bir deeplol.gg URL'si girin.")
             return
         try:
             parsed = parse_deeplol_url(url)
@@ -396,10 +469,13 @@ class DeepLoLImporterApp(ctk.CTk):
             self.champ_menu_var.set(champ_name)
 
             if parsed.mode == "otp":
-                self.mode_var.set("OTP (One-Trick)")
-                self._on_mode_changed("OTP (One-Trick)")
+                otp_label = t(self.lang_code, "mode_otp")
+                self.mode_var.set(otp_label)
+                self._on_mode_changed(otp_label)
             else:
-                self.mode_var.set("Meta & ARAM")
+                meta_label = t(self.lang_code, "mode_meta")
+                self.mode_var.set(meta_label)
+                self._current_mode_key = "meta"
                 self.otp_player_label.grid_forget()
                 self.otp_player_menu.grid_forget()
                 threading.Thread(
@@ -407,9 +483,9 @@ class DeepLoLImporterApp(ctk.CTk):
                     args=(cid, parsed.lane),
                     daemon=True,
                 ).start()
-            self._log(f"URL çözümlendi: {champ_name} ({parsed.lane}, mod={parsed.mode})")
+            self._log(f"URL: {champ_name} ({parsed.lane}, {parsed.mode})")
         except Exception as exc:
-            self._log(f"URL hatası: {exc}")
+            self._log(f"URL Error: {exc}")
 
     def _fetch_meta_builds_worker(
         self,
@@ -418,21 +494,18 @@ class DeepLoLImporterApp(ctk.CTk):
         auto_import: bool = False,
     ) -> None:
         try:
-            champ_name = self.deeplol.get_champion_name(champion_id)
-            self._log(f"{champ_name} için DeepLoL meta buildleri çekiliyor...")
             builds_by_lane = self.deeplol.get_meta_builds(champion_id)
             self._meta_builds_by_lane = builds_by_lane
 
             lanes = list(builds_by_lane.keys())
             if not lanes:
-                self._log(f"{champ_name} için build bulunamadı.")
                 return
 
             chosen_lane = preferred_lane if preferred_lane in builds_by_lane else lanes[0]
             lane_builds = builds_by_lane[chosen_lane]
 
             def _apply_ui() -> None:
-                if self.mode_var.get() == "Meta & ARAM":
+                if self._current_mode_key == "meta":
                     self.lane_or_region_menu.configure(values=lanes)
                     self.lane_or_region_var.set(chosen_lane)
                     self._set_current_builds(lane_builds)
@@ -441,17 +514,14 @@ class DeepLoLImporterApp(ctk.CTk):
 
             self.after(0, _apply_ui)
         except Exception as exc:
-            self._log(f"Meta build çekme hatası: {exc}")
+            self._log(f"Meta build error: {exc}")
 
     def _fetch_otp_list_worker(self, champion_id: int, region: str) -> None:
         try:
-            champ_name = self.deeplol.get_champion_name(champion_id)
-            self._log(f"{champ_name} ({region}) için OTP sıralaması çekiliyor...")
             otps = self.deeplol.get_otp_rankings(champion_id, platform_id=region)
             self._otp_players = otps
             if not otps:
-                self._log(f"{champ_name} ({region}) için OTP verisi bulunamadı.")
-                self.after(0, lambda: self.otp_player_menu.configure(values=["OTP Bulunamadı"]))
+                self.after(0, lambda: self.otp_player_menu.configure(values=["-"]))
                 return
 
             labels = [o.display_label for o in otps]
@@ -463,7 +533,7 @@ class DeepLoLImporterApp(ctk.CTk):
             self.after(0, _update_otp_ui)
             self._fetch_otp_builds_worker(champion_id, otps[0])
         except Exception as exc:
-            self._log(f"OTP listesi hatası: {exc}")
+            self._log(f"OTP list error: {exc}")
 
     def _on_otp_player_selected(self, label: str) -> None:
         for otp in self._otp_players:
@@ -477,17 +547,16 @@ class DeepLoLImporterApp(ctk.CTk):
 
     def _fetch_otp_builds_worker(self, champion_id: int, otp: OTPPlayerSummary) -> None:
         try:
-            self._log(f"OTP {otp.riot_id_name} build detayları çekiliyor...")
             builds = self.deeplol.get_otp_player_builds(champion_id, otp)
             self.after(0, lambda: self._set_current_builds(builds))
         except Exception as exc:
-            self._log(f"OTP build detayı hatası: {exc}")
+            self._log(f"OTP build error: {exc}")
 
     def _set_current_builds(self, builds: list[NormalizedBuild]) -> None:
         self._current_builds = list(builds)
         if not builds:
-            self.build_menu.configure(values=["Build Bulunamadı"])
-            self.build_var.set("Build Bulunamadı")
+            self.build_menu.configure(values=["-"])
+            self.build_var.set("-")
             self._selected_build = None
             self._refresh_preview()
             return
@@ -511,60 +580,55 @@ class DeepLoLImporterApp(ctk.CTk):
         self.preview_box.delete("1.0", "end")
 
         if b is None:
-            self.preview_box.insert("end", "Gösterilecek build seçilmedi.")
+            self.preview_box.insert("end", t(self.lang_code, "preview_empty"))
             self.preview_box.configure(state="disabled")
             return
 
         lines: list[str] = []
-        lines.append(f"Şampiyon : {b.champion_name} ({b.lane})")
-        lines.append(f"Varyasyon: {b.label}")
+        lines.append(t(self.lang_code, "preview_champ", champ=b.champion_name, lane=b.lane))
+        lines.append(t(self.lang_code, "preview_var", label=b.label))
         lines.append("=" * 62)
 
-        # Runes section
         primary_tree = self.deeplol.format_style_name(b.runes.primary_style_id)
         sub_tree = self.deeplol.format_style_name(b.runes.sub_style_id)
         perks = b.runes.selected_perk_ids
-        lines.append(f"\n[RÜN SAYFASI] -> [DeepLoL] {b.champion_name} - {b.lane}")
-        lines.append(f"  Ana Ağaç ({primary_tree}):")
+        lines.append("\n" + t(self.lang_code, "preview_runes", champ=b.champion_name, lane=b.lane))
+        lines.append(f"  {t(self.lang_code, 'preview_primary')} ({primary_tree}):")
         for idx, pid in enumerate(perks[:4]):
-            tag = "Anahtar Rün" if idx == 0 else f"Slot {idx}"
+            tag = t(self.lang_code, "preview_keystone") if idx == 0 else f"Slot {idx}"
             lines.append(f"    • {tag}: {self.deeplol.format_perk_name(pid)} ({pid})")
-        lines.append(f"  Yan Ağaç ({sub_tree}):")
+        lines.append(f"  {t(self.lang_code, 'preview_sub')} ({sub_tree}):")
         for pid in perks[4:6]:
             lines.append(f"    • {self.deeplol.format_perk_name(pid)} ({pid})")
-        lines.append("  Nitelik Rünleri (Stat Shards - Saldırı / Esnek / Savunma):")
+        lines.append(f"  {t(self.lang_code, 'preview_shards')}:")
         for pid in perks[6:9]:
             lines.append(f"    • {self.deeplol.format_perk_name(pid)} ({pid})")
 
-        # Items section
-        lines.append(f"\n[EŞYA SETİ] -> [DeepLoL] {b.champion_name} - {b.lane}")
+        lines.append("\n" + t(self.lang_code, "preview_items", champ=b.champion_name, lane=b.lane))
         for block in b.item_blocks:
             item_names = [self.deeplol.format_item_name(iid) for iid in block.item_ids]
             lines.append(f"  ▪ {block.title}:")
             lines.append(f"    {' -> '.join(item_names)}")
 
-        # Spells section
         if len(b.spells) >= 2:
             s1, s2 = resolve_summoner_spells(b.spells, flash_key=self.flash_key_var.get())
             lines.append(
-                f"\n[SİHİRDAR BÜYÜLERİ] (Sıçra={self.flash_key_var.get()}): "
+                f"\n{t(self.lang_code, 'preview_spells')} (Flash={self.flash_key_var.get()}): "
                 f"D: {self.deeplol.format_spell_name(s1)} | F: {self.deeplol.format_spell_name(s2)}"
             )
 
-        # Skills section
         if b.skill_priority:
             prio_str = " > ".join(SKILL_KEY_MAP.get(s, str(s)) for s in b.skill_priority)
-            lines.append(f"\n[YETENEK ÖNCELİĞİ]: {prio_str}")
+            lines.append(f"\n{t(self.lang_code, 'preview_skill_prio')}: {prio_str}")
         if b.skill_order:
             order_str = " - ".join(SKILL_KEY_MAP.get(s, str(s)) for s in b.skill_order[:15])
-            lines.append(f"[İLK 15 SEVİYE]: {order_str}")
+            lines.append(f"{t(self.lang_code, 'preview_skill_order')}: {order_str}")
 
         self.preview_box.insert("end", "\n".join(lines))
         self.preview_box.configure(state="disabled")
 
     def _on_manual_import_clicked(self) -> None:
         if self._selected_build is None:
-            self._log("Aktarılacak bir build seçili değil.")
             return
         self._execute_lcu_import(self._selected_build)
 
@@ -574,29 +638,35 @@ class DeepLoLImporterApp(ctk.CTk):
                 imported_parts: list[str] = []
                 if self.import_runes_var.get():
                     self.lcu.import_rune_page(build)
-                    imported_parts.append("Rün Sayfası")
+                    imported_parts.append("Runes")
                 if self.import_items_var.get():
                     self.lcu.import_item_set(build)
-                    imported_parts.append("Eşya Seti")
+                    imported_parts.append("Item Set")
                 if self.import_spells_var.get() and len(build.spells) >= 2:
                     try:
                         self.lcu.import_spells(build, flash_key=self.flash_key_var.get())
-                        imported_parts.append(f"Büyüler (Sıçra={self.flash_key_var.get()})")
+                        imported_parts.append(f"Spells (Flash={self.flash_key_var.get()})")
                     except Exception as spell_exc:
-                        self._log(f"Büyü aktarım uyarısı: {spell_exc}")
+                        self._log(f"Spells warning: {spell_exc}")
 
                 if imported_parts:
                     summary = ", ".join(imported_parts)
-                    self._log(f"✅ LCU Aktarımı Başarılı ({build.champion_name} - {build.lane}): {summary}")
-                else:
-                    self._log("⚠️ Aktarılacak hiçbir bileşen seçili değil (Rün / Eşya / Büyü).")
+                    self._log(
+                        t(
+                            self.lang_code,
+                            "log_imported",
+                            champ=build.champion_name,
+                            lane=build.lane,
+                            parts=summary,
+                        )
+                    )
             except Exception as exc:
-                self._log(f"❌ LCU Aktarım Hatası: {exc}")
+                self._log(f"❌ LCU Error: {exc}")
 
         threading.Thread(target=_worker, daemon=True).start()
 
     def _poll_lcu_loop(self) -> None:
-        if self._stop_Polling:
+        if self._stop_polling:
             return
         threading.Thread(target=self._check_lcu_status_worker, daemon=True).start()
         self.after(2500, self._poll_lcu_loop)
@@ -604,32 +674,33 @@ class DeepLoLImporterApp(ctk.CTk):
     def _check_lcu_status_worker(self) -> None:
         try:
             summoner = self.lcu.get_current_summoner()
-            game_name = summoner.get("gameName") or summoner.get("displayName") or "Sihirdar"
+            game_name = summoner.get("gameName") or summoner.get("displayName") or "Summoner"
             tag_line = summoner.get("tagLine")
             full_name = f"{game_name}#{tag_line}" if tag_line else game_name
+            self._last_connected_summoner = full_name
 
             cs_state = self.lcu.get_champ_select_state()
 
             def _update_connected() -> None:
                 self.lcu_status_label.configure(
-                    text=f"🟢 LCU Bağlı: {full_name}",
+                    text=t(self.lang_code, "lcu_connected", name=full_name),
                     text_color="#34d399",
                 )
                 if not cs_state.in_champ_select:
                     self.champ_select_label.configure(
-                        text="Şampiyon Seçimi: Aktif Değil",
+                        text=t(self.lang_code, "cs_inactive"),
                         text_color="#9ca3af",
                     )
                 elif cs_state.champion_id > 0:
                     cname = self.deeplol.get_champion_name(cs_state.champion_id)
                     lane = map_lcu_position_to_deeplol_lane(cs_state.assigned_position, cs_state.game_mode)
                     self.champ_select_label.configure(
-                        text=f"Şampiyon Seçimi: {cname} ({lane})",
+                        text=t(self.lang_code, "cs_active", champ=cname, lane=lane),
                         text_color="#60a5fa",
                     )
                 else:
                     self.champ_select_label.configure(
-                        text="Şampiyon Seçimi: Şampiyon Bekleniyor...",
+                        text=t(self.lang_code, "cs_waiting"),
                         text_color="#fbbf24",
                     )
 
@@ -647,10 +718,6 @@ class DeepLoLImporterApp(ctk.CTk):
                     cname = self.deeplol.get_champion_name(cs_state.champion_id)
                     self.after(0, lambda: self.champ_menu_var.set(cname))
                     should_auto = self.auto_import_var.get()
-                    self._log(
-                        f"🎯 Şampiyon Seçimi algılandı: {cname} ({detected_lane}) "
-                        f"{'[Otomatik Aktarılıyor]' if should_auto else '[Önizleme Yükleniyor]'}"
-                    )
                     self._fetch_meta_builds_worker(
                         cs_state.champion_id,
                         preferred_lane=detected_lane,
@@ -660,13 +727,15 @@ class DeepLoLImporterApp(ctk.CTk):
                 self._last_auto_imported_key = None
 
         except Exception:
+            self._last_connected_summoner = None
+
             def _update_disconnected() -> None:
                 self.lcu_status_label.configure(
-                    text="🔴 LCU: LoL İstemcisi Bekleniyor...",
+                    text=t(self.lang_code, "lcu_waiting"),
                     text_color="#f87171",
                 )
                 self.champ_select_label.configure(
-                    text="Şampiyon Seçimi: Aktif Değil",
+                    text=t(self.lang_code, "cs_inactive"),
                     text_color="#9ca3af",
                 )
 
